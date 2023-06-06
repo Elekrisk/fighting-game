@@ -1,28 +1,49 @@
 #![feature(default_free_fn)]
+#![feature(trivial_bounds)]
+#![feature(let_chains)]
+#![feature(int_roundings)]
+
+mod animation;
+mod character;
+mod effects;
+mod fixedpoint;
+mod movelist;
+mod physics;
+mod ui;
+mod vec2;
 
 use std::{
+    collections::HashMap,
     default::default,
     ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
 };
 
+use animation::{Animation, Animator, Hitboxes};
 use bevy::{
-    asset::LoadState,
+    asset::{AssetPath, LoadState},
     prelude::{
         App, AssetEvent, AssetServer, Assets, Camera2dBundle, ClearColor, Color, Commands,
         Component, CoreSchedule, CoreSet, EventReader, FixedTime, GamepadButtonType, Handle, Image,
-        ImagePlugin, IntoSystemConfig, KeyCode, Msaa, PluginGroup, Query, Res, ResMut, Resource,
-        Transform,
+        ImagePlugin, IntoSystemConfig, IntoSystemConfigs, KeyCode, Msaa, PluginGroup, Query, Res,
+        ResMut, Resource, Transform,
     },
     render::{render_resource::FilterMode, texture::ImageSampler},
     sprite::{Anchor, Sprite, SpriteBundle, SpriteSheetBundle, TextureAtlas, TextureAtlasSprite},
     window::{Window, WindowPlugin},
     DefaultPlugins,
 };
+use character::{Health, InputAction, InputActionKind, InputHistory, Team, FacingDirection};
+use effects::{Effect, Effects};
+use fixedpoint::FixedPoint;
 use leafwing_input_manager::{
     orientation::Rotation,
     prelude::{ActionState, InputManagerPlugin, InputMap, VirtualDPad},
     Actionlike, InputManagerBundle,
 };
+use movelist::{InputMatcher, Move, Movelist, StateMatcher};
+use physics::Collisions;
+use ui::setup_ui;
+use vec2::Vec2;
 
 fn main() {
     let mut app = App::new();
@@ -42,40 +63,53 @@ fn main() {
                 }),
         )
         .add_plugin(InputManagerPlugin::<Input>::default())
-        .add_startup_system(startup)
+        .add_startup_systems((startup, ui::setup_ui))
         .add_system(input);
+    animation::init(&mut app);
     app.get_schedule_mut(CoreSchedule::FixedUpdate)
         .unwrap()
-        .add_system(velocity_system.after(input))
-        .add_system(animation.after(velocity_system))
-        .add_system(render_system.after(animation))
-        .add_system(tick_frame.after(render_system));
+        .add_systems(
+            (
+                character::facing_corrector,
+                character::input_manager,
+                character::state_manager,
+                velocity_system,
+                animation::animator,
+                physics::collisions,
+                physics::collision_resolver,
+                effects::apply_effects,
+                ui::ui_system,
+                render_system,
+                tick_frame,
+            )
+                .chain(),
+        );
     app.run();
 }
 
-#[derive(Component)]
-struct Animation {
-    first_frame: usize,
-    last_frame: usize,
-    frame_delay: usize,
-    last_switch_frame: usize,
-}
+// #[derive(Component)]
+// struct Animation {
+//     first_frame: usize,
+//     last_frame: usize,
+//     frame_delay: usize,
+//     last_switch_frame: usize,
+// }
 
-impl Animation {
-    fn new(
-        first_frame: usize,
-        last_frame: usize,
-        frame_delay: usize,
-        last_switch_frame: usize,
-    ) -> Self {
-        Self {
-            first_frame,
-            last_frame,
-            frame_delay,
-            last_switch_frame,
-        }
-    }
-}
+// impl Animation {
+//     fn new(
+//         first_frame: usize,
+//         last_frame: usize,
+//         frame_delay: usize,
+//         last_switch_frame: usize,
+//     ) -> Self {
+//         Self {
+//             first_frame,
+//             last_frame,
+//             frame_delay,
+//             last_switch_frame,
+//         }
+//     }
+// }
 
 #[derive(Component, PartialEq, Eq)]
 struct Player(usize);
@@ -83,43 +117,46 @@ struct Player(usize);
 #[derive(Resource, Default)]
 struct Frameticker {
     current_frame: usize,
+    pause: bool,
 }
 
 fn tick_frame(mut frame_ticker: ResMut<Frameticker>) {
-    frame_ticker.current_frame += 1;
+    if !frame_ticker.pause {
+        frame_ticker.current_frame += 1;
+    }
 }
 
-fn animation(
-    mut query: Query<(&Position, &mut TextureAtlasSprite, &mut Animation, &Player)>,
-    mut q2: Query<(&Position, &Player)>,
-    frame_ticker: Res<Frameticker>,
-) {
-    let cur_frame = frame_ticker.current_frame;
+// fn animation(
+//     mut query: Query<(&Position, &mut TextureAtlasSprite, &mut Animation, &Player)>,
+//     mut q2: Query<(&Position, &Player)>,
+//     frame_ticker: Res<Frameticker>,
+// ) {
+//     let cur_frame = frame_ticker.current_frame;
 
-    query.for_each_mut(|(position, mut sprite, mut anim, player)| {
-        let frames_passed = cur_frame - anim.last_switch_frame;
+//     query.for_each_mut(|(position, mut sprite, mut anim, player)| {
+//         let frames_passed = cur_frame - anim.last_switch_frame;
 
-        let mut reverse = false;
+//         let mut reverse = false;
 
-        q2.for_each(|(pos, p)| {
-            if p != player && pos.0.x.0 < position.0.x.0 {
-                reverse = true;
-            }
-        });
+//         q2.for_each(|(pos, p)| {
+//             if p != player && pos.0.x.0 < position.0.x.0 {
+//                 reverse = true;
+//             }
+//         });
 
-        sprite.flip_x = reverse;
+//         sprite.flip_x = reverse;
 
-        if frames_passed >= anim.frame_delay {
-            let mut frame = sprite.index + 1;
-            anim.last_switch_frame = cur_frame;
-            if frame > anim.last_frame {
-                frame = anim.first_frame;
-            }
+//         if frames_passed >= anim.frame_delay {
+//             let mut frame = sprite.index + 1;
+//             anim.last_switch_frame = cur_frame;
+//             if frame > anim.last_frame {
+//                 frame = anim.first_frame;
+//             }
 
-            sprite.index = frame;
-        }
-    })
-}
+//             sprite.index = frame;
+//         }
+//     })
+// }
 
 fn startup(
     mut commands: Commands,
@@ -156,12 +193,15 @@ fn startup(
     );
     let player_idle = texture_atlases.add(texture_atlas);
 
+    let anim = asset_server.load("c1_walking_v2.anim");
+
     spawn_player(
         &mut commands,
         1,
         -50.0,
         input_map_p1,
-        player_idle.clone(),
+        anim.clone(),
+        Team::Team1,
         &asset_server,
     );
     spawn_player(
@@ -169,7 +209,8 @@ fn startup(
         2,
         50.0,
         input_map_p2,
-        player_idle,
+        anim,
+        Team::Team2,
         &asset_server,
     );
 }
@@ -179,7 +220,8 @@ fn spawn_player(
     player: usize,
     x_pos: f32,
     input_map: InputMap<Input>,
-    player_idle: Handle<TextureAtlas>,
+    player_idle: Handle<Animation>,
+    team: Team,
     asset_server: &AssetServer,
 ) {
     // let bundle = SpriteBundle {
@@ -190,12 +232,27 @@ fn spawn_player(
     //     },
     //     ..default()
     // };
+
+    let path = asset_server.get_handle_path(&player_idle).unwrap();
+    let atlas_path = AssetPath::new(path.path().to_path_buf(), Some("spritesheet".into()));
+    let atlas = asset_server.get_handle(atlas_path);
+
     let mut bundle = SpriteSheetBundle {
         sprite: TextureAtlasSprite::new(0),
-        texture_atlas: player_idle,
+        texture_atlas: atlas,
         ..default()
     };
     bundle.sprite.anchor = Anchor::BottomCenter;
+
+    let animations: HashMap<&str, Handle<Animation>> = [
+        ("idle", asset_server.load("c1_idle.anim")),
+        ("walking_forward", asset_server.load("c1_walking.anim")),
+        ("walking_forward_2", asset_server.load("c1_walking_v2.anim")),
+        ("walking_backward", asset_server.load("c1_walking_v2.anim")),
+        ("punching", asset_server.load("c1_punch.anim")),
+    ]
+    .into_iter()
+    .collect();
 
     commands
         .spawn(InputManagerBundle::<Input> {
@@ -206,20 +263,50 @@ fn spawn_player(
         .insert(bundle)
         .insert(Position(Vec2 {
             x: (x_pos).into(),
-            y: FixedPoint(0),
+            y: FixedPoint::ZERO,
         }))
         .insert(Velocity(Vec2 {
-            x: FixedPoint(0),
-            y: FixedPoint(0),
+            x: FixedPoint::ZERO,
+            y: FixedPoint::ZERO,
         }))
         .insert(Character {
             state: CharacterState::Grounded,
         })
-        .insert(Animation::new(0, 1, 30, 0))
+        .insert(character::Character {
+            just_transitioned: true,
+            animations: animations.clone(),
+            new_anim: true,
+            ..default()
+        })
+        .insert(Animator {
+            animation: player_idle,
+            last_frame_change: 0,
+            just_changed_animation: true,
+            idle_after_animation: false,
+        })
+        .insert(Movelist {
+            moves: vec![Move {
+                name: "Jab".into(),
+                input_matcher: InputMatcher::Button(movelist::Button::Punch),
+                valid_in_states: StateMatcher::all(),
+                to_state: character::CharacterState::Normal,
+                animation: animations["punching"].clone(),
+                effects: vec![Effect::Damage(10.0.into()), Effect::Hitstun(21), Effect::Blockstun(15), Effect::Pushback(0.8.into())],
+            }],
+        })
+        .insert(Hitboxes { hitboxes: vec![] })
+        .insert(Collisions { collisions: vec![] })
+        .insert(Effects { effects: vec![] })
+        .insert(team)
+        .insert(Health {
+            value: 100.0.into(),
+        })
+        // .insert(Animation::new(0, 1, 30, 0))
         .insert(Player(player));
 }
 
 fn input(
+    frame_ticker: Res<Frameticker>,
     mut query: Query<(
         &ActionState<Input>,
         &mut InputHistory,
@@ -237,28 +324,55 @@ fn input(
                 .unwrap_or(AbsoluteDirection::Neutral);
 
             if dir != input_history.last_dir {
-                input_history.last_dir = dir;
-                // println!("{dir:?}");
+                if let Some(time) = input_history.find_last_pressed_dir(input_history.last_dir) {
+                    let direction = input_history.last_dir;
+                    input_history.move_buffer.push(InputAction {
+                        time: frame_ticker.current_frame,
+                        kind: InputActionKind::ReleaseDirection {
+                            direction,
+                            duration: frame_ticker.current_frame - time,
+                        },
+                    });
+                }
+                input_history.move_buffer.push(InputAction {
+                    time: frame_ticker.current_frame,
+                    kind: InputActionKind::PressDirection(dir),
+                });
             }
+
             if action_state.just_pressed(Input::Punch) {
-                // println!("Punch");
+                input_history.move_buffer.push(InputAction {
+                    time: frame_ticker.current_frame,
+                    kind: InputActionKind::PressButton(movelist::Button::Punch),
+                });
+            }
+            if action_state.just_released(Input::Punch) {
+                if let Some(time) = input_history.find_last_pressed_button(movelist::Button::Punch)
+                {
+                    input_history.move_buffer.push(InputAction {
+                        time: frame_ticker.current_frame,
+                        kind: InputActionKind::ReleaseButton {
+                            button: movelist::Button::Punch,
+                            duration: frame_ticker.current_frame - time,
+                        },
+                    });
+                }
             }
             if action_state.just_pressed(Input::Kick) {
-                // println!("Kick");
+                input_history.move_buffer.push(InputAction {
+                    time: frame_ticker.current_frame,
+                    kind: InputActionKind::PressButton(movelist::Button::Kick),
+                });
             }
-
-            if character.state == CharacterState::Grounded {
-                if dir == AbsoluteDirection::Left {
-                    velocity.0.x = (-1f32).into();
-                } else if dir == AbsoluteDirection::Right {
-                    velocity.0.x = 1f32.into();
-                } else if dir == AbsoluteDirection::Neutral {
-                    velocity.0.x = 0f32.into();
-                }
-
-                if dir.is_up() {
-                    velocity.0.y = 4f32.into();
-                    character.state = CharacterState::Jumping;
+            if action_state.just_released(Input::Kick) {
+                if let Some(time) = input_history.find_last_pressed_button(movelist::Button::Kick) {
+                    input_history.move_buffer.push(InputAction {
+                        time: frame_ticker.current_frame,
+                        kind: InputActionKind::ReleaseButton {
+                            button: movelist::Button::Kick,
+                            duration: frame_ticker.current_frame - time,
+                        },
+                    });
                 }
             }
         },
@@ -270,10 +384,17 @@ fn velocity_system(mut query: Query<(&mut Position, &mut Velocity, &mut Characte
         pos.0 = pos.0 + vel.0;
         vel.0.y -= FixedPoint::from(0.2);
 
-        if pos.0.y.0 < 0 {
-            pos.0.y.0 = 0;
-            vel.0.y.0 = 0;
+        if pos.0.y < FixedPoint::ZERO {
+            pos.0.y = FixedPoint::ZERO;
+            vel.0.y = FixedPoint::ZERO;
             character.state = CharacterState::Grounded;
+        }
+
+        if pos.0.x < FixedPoint::from(-100.0) {
+            pos.0.x = FixedPoint::from(-100.0);
+        }
+        if pos.0.x > FixedPoint::from(100.0) {
+            pos.0.x = FixedPoint::from(100.0);
         }
     });
 }
@@ -291,12 +412,6 @@ enum Input {
     Punch,
     Kick,
 }
-
-#[derive(Component, Default)]
-struct InputHistory {
-    last_dir: AbsoluteDirection,
-}
-
 #[derive(Component)]
 struct Character {
     state: CharacterState,
@@ -308,121 +423,14 @@ enum CharacterState {
     Jumping,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-struct FixedPoint(i64);
-
-impl FixedPoint {
-    const DECIMALS: usize = 16;
-}
-
-impl Add for FixedPoint {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(self.0 + rhs.0)
-    }
-}
-
-impl AddAssign for FixedPoint {
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-
-impl Sub for FixedPoint {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self(self.0 - rhs.0)
-    }
-}
-
-impl SubAssign for FixedPoint {
-    fn sub_assign(&mut self, rhs: Self) {
-        *self = *self - rhs;
-    }
-}
-
-impl Mul for FixedPoint {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        Self((self.0 * rhs.0) >> Self::DECIMALS)
-    }
-}
-
-impl MulAssign for FixedPoint {
-    fn mul_assign(&mut self, rhs: Self) {
-        *self = *self * rhs;
-    }
-}
-
-impl From<FixedPoint> for f32 {
-    fn from(value: FixedPoint) -> Self {
-        value.0 as f32 / 2usize.pow(FixedPoint::DECIMALS as _) as f32
-    }
-}
-
-impl From<f32> for FixedPoint {
-    fn from(value: f32) -> Self {
-        let v = value * 2usize.pow(FixedPoint::DECIMALS as _) as f32;
-        if v > i64::MAX as f32 {
-            Self(i64::MAX)
-        } else if v < i64::MIN as f32 {
-            Self(i64::MIN)
-        } else {
-            Self(v as i64)
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct Vec2 {
-    x: FixedPoint,
-    y: FixedPoint,
-}
-
-impl Add for Vec2 {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self {
-            x: self.x + rhs.x,
-            y: self.y + rhs.y,
-        }
-    }
-}
-
-impl Sub for Vec2 {
-    type Output = Self;
-
-    fn sub(self, rhs: Self) -> Self::Output {
-        Self {
-            x: self.x - rhs.x,
-            y: self.y - rhs.y,
-        }
-    }
-}
-
-impl Mul<FixedPoint> for Vec2 {
-    type Output = Self;
-
-    fn mul(self, rhs: FixedPoint) -> Self::Output {
-        Self {
-            x: self.x * rhs,
-            y: self.y * rhs,
-        }
-    }
-}
-
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 struct Position(Vec2);
 
 #[derive(Component)]
 struct Velocity(Vec2);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-enum AbsoluteDirection {
+pub enum AbsoluteDirection {
     Right,
     DownRight,
     Down,
@@ -438,6 +446,24 @@ enum AbsoluteDirection {
 impl AbsoluteDirection {
     fn is_up(&self) -> bool {
         matches!(self, Self::Up | Self::UpRight | Self::UpLeft)
+    }
+
+    fn flipped(&self, facing: FacingDirection) -> Self {
+        if facing == FacingDirection::Left {
+            match self {
+                AbsoluteDirection::Right => AbsoluteDirection::Left,
+                AbsoluteDirection::DownRight => AbsoluteDirection::DownLeft,
+                AbsoluteDirection::Down => AbsoluteDirection::Down,
+                AbsoluteDirection::DownLeft => AbsoluteDirection::DownRight,
+                AbsoluteDirection::Left => AbsoluteDirection::Right,
+                AbsoluteDirection::UpLeft => AbsoluteDirection::UpRight,
+                AbsoluteDirection::Up => AbsoluteDirection::Up,
+                AbsoluteDirection::UpRight => AbsoluteDirection::UpLeft,
+                AbsoluteDirection::Neutral => AbsoluteDirection::Neutral,
+            }
+        } else {
+            *self
+        }
     }
 }
 

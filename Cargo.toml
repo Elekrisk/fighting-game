@@ -15,3 +15,7 @@ opt-level = 3
 [dependencies]
 bevy = { version = "0.10" }
 leafwing-input-manager = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.21"
+image = "0.24"
